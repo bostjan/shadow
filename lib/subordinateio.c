@@ -13,7 +13,6 @@
 #include "subordinateio.h"
 #include <sys/types.h>
 #include <pwd.h>
-#include <grp.h>
 
 struct subordinate_range {
 	const char *owner;
@@ -215,56 +214,40 @@ static const struct subordinate_range *find_range(struct commonio_db *db,
 
 
         /*
-         * We only do special handling for files mentioned
-         * in the switch/case statement, abort for the rest.
+         * We only do special handling for these two files
          */
         if ((0 != strcmp(db->filename, "/etc/subuid")) && (0 != strcmp(db->filename, "/etc/subgid")))
                 return NULL;
 
         /*
-         * Search for numeric UID/GID specification
-         *
-         * If the search above did not produce a result, try searching for
-         * numerical UID/GID.
+         * Search loop above did not produce any result. Let's rerun it,
+         * but this time try to matcha actual UIDs. The first entry that
+         * matches is considered a success.
+         * (It may be specified as literal UID or as another username which
+         * has the same UID as the username we are looking for.)
          */
-        struct passwd  owner_pwd;
-        struct passwd *owner_pwd_result;
-        char          *buf;
-        size_t         bufsize;
-        int            s;
+        struct passwd *pwd;
+        uid_t          owner_uid;
         char           owner_uid_string[33] = "";
 
 
-        bufsize = sysconf(_SC_GETPW_R_SIZE_MAX);
-        if (bufsize == -1) {       /* Value was indeterminate */
-                bufsize = 16384;   /* Should be more than enough */
-        }
-        buf = malloc(bufsize);
-        if (buf == NULL) {
-                perror("malloc");
-                exit(EXIT_FAILURE);
-        }
-        s = getpwnam_r(owner, &owner_pwd, buf, bufsize, &owner_pwd_result);
-        if (s != 0) {
-                perror("getpwnam_r");
-                exit(EXIT_FAILURE);
-        }
-        if (owner_pwd_result == NULL) {   /* Missing entry in /etc/passwd? */
-                free(buf);
+        /* Get UID of the username we are looking for */
+        pwd = getpwnam(owner);
+        if (NULL == pwd) {
+                /* Username not defined in /etc/passwd, or error occured during lookup */
                 return NULL;
         }
-        sprintf(owner_uid_string, "%u", owner_pwd.pw_uid);
-
+        owner_uid = pwd->pw_uid;
+        sprintf(owner_uid_string, "%lu", (unsigned long int)owner_uid);
 
         commonio_rewind(db);
         while ((range = commonio_next(db)) != NULL) {
                 unsigned long first = range->start;
                 unsigned long last = first + range->count - 1;
 
-
                 /*
                  * First check if range owner is specified as numeric UID
-                 * instead as username/group and if it matches.
+                 * and if it matches.
                  */
                 if (0 != strcmp(range->owner, owner_uid_string)) {
                         /*
@@ -281,22 +264,21 @@ static const struct subordinate_range *find_range(struct commonio_db *db,
                         const struct passwd *range_owner_pwd;
 
                         range_owner_pwd = getpwnam(range->owner);
-                        if (!range_owner_pwd) {
+                        if (NULL == range_owner_pwd) {
                                 continue;
                         }
 
-                        if (owner_pwd.pw_uid != range_owner_pwd->pw_uid) {
+                        if (owner_uid != range_owner_pwd->pw_uid) {
                                 continue;
                         }
                 }
 
                 /* Owner matches, now let us check this UID/GID range */
                 if ((val >= first) && (val <= last)) {
-                        free(buf);
                         return range;
                 }
         }
-        free(buf);
+
 	return NULL;
 }
 
